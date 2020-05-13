@@ -5,7 +5,6 @@ import copy
 from .metrics import ValueMetric, TreeMetric
 
 import time
-import torch
 
 
 def train(model, trainset):
@@ -18,7 +17,7 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
     best_dev_metric = None
     trainloader = trainset.get_loader(batch_size, device, shuffle=True)
     devsize = devset.len() if hasattr(devset, 'len') else batch_size
-    devloader = devset.get_loader(devsize, device) #batch_size al posto di 1
+    devloader = devset.get_loader(devsize, device)
 
     best_metrics = []
     best_epoch = -1
@@ -38,8 +37,9 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
         tr_forw_time = 0
         tr_backw_time = 0
         val_time = 0
-        # TODO: check if tqdm remains filled if > len
-        L = 0 #togliere
+        LOSS = 0
+
+
         with tqdm(total=len(trainset), desc='Training epoch ' + str(epoch) + ': ') as pbar:
             for step, batch in enumerate(trainloader):
 
@@ -48,7 +48,7 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
 
                 model_output = model(*in_data)
                 loss = loss_function(model_output, out_data)
-                L += loss  #togliere
+                LOSS += loss  #togliere
 
                 tr_forw_time += (time.time() - t)
 
@@ -60,8 +60,9 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
 
                 pbar.update(n_samples)
 
-        print("--------------------------------------------------------------------------------------------------------------        EPOCH LOSS", L.item()) #togliere
-        #print("OUT EMB", model.model.decoder.cell.emb_module.emb.weight)
+        #logger.info("Epoch Train Loss    " + str(LOSS.item()))
+        #logger.info("Epoch Execution Time    " + str(tr_forw_time+tr_backw_time))
+
         # eval on dev set
         model.eval()
         with tqdm(total=len(devset), desc='Validate epoch ' + str(epoch) + ' on dev set: ') as pbar:
@@ -71,7 +72,6 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
                 in_data, out_data, n_samples, graph = extract_batch_data(batch)
                 with th.no_grad():
                     out = model(*in_data)
-                    #out = None
 
                 # update all metrics
                 for v in metrics:
@@ -111,7 +111,7 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
 
         # lr decay
         for param_group in optimizer.param_groups:
-            param_group['lr'] = max(1e-5, param_group['lr'] * 0.99)  # 10
+            param_group['lr'] = max(1e-5, param_group['lr'] * 0.99)
 
         tr_forw_time_list.append(tr_forw_time)
         tr_backw_time_list.append(tr_backw_time)
@@ -123,7 +123,7 @@ def train_and_validate(model, extract_batch_data, loss_function, optimizer, trai
 def test(model, extract_batch_data, testset, device, metrics_class, batch_size=25):
     logger = get_new_logger('test')
     testsize = testset.len() if hasattr(testset, 'len') else batch_size
-    testloader = testset.get_loader(testsize, device) #batch_size al posto di 1
+    testloader = testset.get_loader(testsize, device)
 
     test_metrics = []
     for c in metrics_class:
@@ -155,24 +155,26 @@ def test(model, extract_batch_data, testset, device, metrics_class, batch_size=2
 
     return test_metrics
 
+
+
 #TODO: fix deepcopy problem (changing splits management)
-def k_fold_validation(model, extract_batch_data, loss_function, optimizer, dataset, splits, device, metrics_class, batch_size=25, n_epochs=200, early_stopping_patience=20):
-    logger = get_new_logger('k-fold')
-    fold_models = []
-    fold_metrics = []
-    trainset = copy.deepcopy(dataset)
-    devset = copy.deepcopy(dataset)
-    k = len(splits)
-    for i in range(k):
-        model = copy.deepcopy(model) #initialized model everytime
-        devset.data = splits[i]
-        tset = splits[:i]+splits[i+1:]
-        tset = [item for list in tset for item in list]
-        trainset.data = tset
-        logger.info('FOLD ' + str(i+1) + "-------------------")
-        best_model, best_dev_metrics, *others = train_and_validate(model, extract_batch_data, loss_function, optimizer, trainset, devset, device, metrics_class, batch_size, n_epochs, early_stopping_patience)
-        fold_models.append(best_model)
-        fold_metrics.append([x.get_value() for x in best_dev_metrics]) #take metrics values
-    avg_metrics = torch.mean(torch.Tensor(fold_metrics), 0) #average metrics values
-    logger.info('Average fold metrics: ' + str(avg_metrics))
-    return fold_models, avg_metrics
+# def k_fold_validation(model, extract_batch_data, loss_function, optimizer, dataset, splits, device, metrics_class, batch_size=25, n_epochs=200, early_stopping_patience=20):
+#     logger = get_new_logger('k-fold')
+#     fold_models = []
+#     fold_metrics = []
+#     trainset = copy.deepcopy(dataset)
+#     devset = copy.deepcopy(dataset)
+#     k = len(splits)
+#     for i in range(k):
+#         model = copy.deepcopy(model) #initialized model everytime
+#         devset.data = splits[i]
+#         tset = splits[:i]+splits[i+1:]
+#         tset = [item for list in tset for item in list]
+#         trainset.data = tset
+#         logger.info('FOLD ' + str(i+1) + "-------------------")
+#         best_model, best_dev_metrics, *others = train_and_validate(model, extract_batch_data, loss_function, optimizer, trainset, devset, device, metrics_class, batch_size, n_epochs, early_stopping_patience)
+#         fold_models.append(best_model)
+#         fold_metrics.append([x.get_value() for x in best_dev_metrics]) #take metrics values
+#     avg_metrics = torch.mean(torch.Tensor(fold_metrics), 0) #average metrics values
+#     logger.info('Average fold metrics: ' + str(avg_metrics))
+#     return fold_models, avg_metrics

@@ -46,7 +46,6 @@ class TreeLSTM(nn.Module):
         # propagate
         dgl.prop_nodes_topo(g)
         # compute output
-        #h = g.ndata.pop('h')
         h = g.ndata['h']
         out = self.output_module(h)
         return out

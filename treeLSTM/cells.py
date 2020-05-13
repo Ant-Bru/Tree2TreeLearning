@@ -3,45 +3,6 @@ import torch.nn as nn
 import math
 import numpy as np
 
-from itertools import permutations
-
-def __bin_coeff__(n,k):
-    return math.factorial(n) // (math.factorial(k) * math.factorial(n-k))
-
-
-def __comb_with_rep__(n,k):
-    return __bin_coeff__(n+k-1, k)
-
-
-# we assume size contains same len, i.e otuptu has size n^d \time n.
-# only n^d is symmentric.
-def __get_symmetric_idx__(n, d):
-    out_shape = tuple([n for i in range(d+1)])
-    n_el = n**(d+1)
-    v_idx = {}
-    gather_idx = np.array([-1 for i in range(n_el)])
-
-    for i in range(n_el):
-        i_tuple = list(np.unravel_index(i, out_shape))
-        to_sort_idx = i_tuple[:-1]
-        last_idx = i_tuple[-1]
-        i_tuple_sorted = tuple(sorted(to_sort_idx) + [last_idx])
-
-        if i_tuple_sorted in v_idx:
-            idx_param = v_idx[i_tuple_sorted]
-        else:
-            idx_param = len(v_idx)
-            v_idx[i_tuple_sorted] = idx_param
-
-        gather_idx[i] = idx_param
-
-    #TODO: return a tensor and register as a buffer
-    return nn.Parameter(th.LongTensor(gather_idx), requires_grad=False)
-
-
-def __get_symmetric_tensor_view__(w, idx, out_shape, output_axis):
-    #TODO: this function can be called only after a optim.step() rahter than every time
-    return w.gather(0, idx).view(out_shape).transpose(output_axis, len(out_shape)-1).contiguous()
 
 
 class GenericTreeLSTMCell(nn.Module):
@@ -131,6 +92,154 @@ class GenericTreeLSTMCell(nn.Module):
         return {'h': h, 'c': c}
 
 
+# --------------------------------------- Neural-based aggregation -----------------------------------------------------
+
+# h = U1*h1 + U2*h2 + ... + Un*hn
+class NaryCell(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(NaryCell, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        if not self.pos_stationarity:
+            #NARY aggregation
+            # define parameters for the computation of iou
+            self.U = nn.Linear(max_output_degree * h_size, 3*h_size, bias=False)
+        else:
+            #SUMCHILD aggrefation
+            self.U = nn.Linear(h_size, 3 * h_size, bias=False)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        if not self.pos_stationarity:
+            return self.U(neighbour_h.view(neighbour_h.size(0), -1))
+        else:
+            return self.U(th.sum(neighbour_h, 1))
+
+
+#similar to ChildSum but instead of performing aggregation by sum of children states
+#aggregation is performed by a GRU treating children as a sequence
+class FwGRUCell(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(FwGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        self.GRU = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias = False)
+        self.U = nn.Linear(h_size, 3 * h_size, bias=False)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        return  self.U(self.GRU(neighbour_h)[1].squeeze(0))
+
+
+#like the FwGRUCell but processing children states in both direction with the same GRU
+class BiGRUCell(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(BiGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        self.GRU = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first = True, bias = False)
+        self.U_fw = nn.Linear(h_size, 3 * h_size, bias=False)
+        self.U_bw = nn.Linear(h_size, 3 * h_size, bias=False)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        states, h_fw = self.GRU(neighbour_h)
+        states, h_bw = self.GRU(neighbour_h.flip(1))
+        return self.U_fw(h_fw.squeeze(0)) + self.U_bw(h_bw.squeeze(0))
+
+
+#like the FwGRUCell but using one forward GRU and one backward GRU
+class DoubleGRUCell(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(DoubleGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        self.GRU_fw = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias=False)
+        self.GRU_bw = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias=False)
+        self.U_fw = nn.Linear(h_size, 3 * h_size, bias=False)
+        self.U_bw = nn.Linear(h_size, 3 * h_size, bias=False)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        states, h_fw = self.GRU_fw(neighbour_h)
+        states, h_bw = self.GRU_bw(neighbour_h.flip(1))
+        return self.U_fw(h_fw.squeeze(0)) + self.U_bw(h_bw.squeeze(0))
+
+
+#---- extra untested aggregations
+
+#Simple FeedForward aggregation (semi-positional)
+class SimpleFFAggregationCell(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(SimpleFFAggregationCell, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        self.first_layer = nn.Linear(h_size, h_size, bias=True)
+        self.last_layer = nn.Linear(h_size * max_output_degree, 3 * h_size, bias=True)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        flatten_h_child = th.tanh(self.first_layer.forward(neighbour_h).view(neighbour_h.size(0),-1))
+        out = th.tanh(self.last_layer.forward(flatten_h_child))
+        return out
+
+
+#Simple FeedForward aggregation (non-positional)
+class SimpleFFAggregationCell2(GenericTreeLSTMCell):
+
+    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
+        super(SimpleFFAggregationCell2, self).__init__(h_size, max_output_degree, pos_stationarity)
+
+        self.transform = nn.Linear(h_size, h_size, bias=True)
+
+    # neighbour_states has shape batch_size x n_neighbours x insize
+    def compute_iou_gate(self, neighbour_h):
+        h_interm = th.tanh(self.transform(neighbour_h)) #apply transformation to each child
+        mean = th.mean(h_interm,1) #get mean of transformations
+        return mean.repeat(1,3) #repetition for the 3 gates
+
+
+
+#---------------------------------------- Tensor-based aggregation -----------------------------------------------------
+#Author: Daniele Castellana   (daniele.castellana@di.unipi.it)
+
+def __bin_coeff__(n,k):
+    return math.factorial(n) // (math.factorial(k) * math.factorial(n-k))
+
+def __comb_with_rep__(n,k):
+    return __bin_coeff__(n+k-1, k)
+
+# we assume size contains same len, i.e otuptu has size n^d \time n.
+# only n^d is symmentric.
+def __get_symmetric_idx__(n, d):
+    out_shape = tuple([n for i in range(d+1)])
+    n_el = n**(d+1)
+    v_idx = {}
+    gather_idx = np.array([-1 for i in range(n_el)])
+
+    for i in range(n_el):
+        i_tuple = list(np.unravel_index(i, out_shape))
+        to_sort_idx = i_tuple[:-1]
+        last_idx = i_tuple[-1]
+        i_tuple_sorted = tuple(sorted(to_sort_idx) + [last_idx])
+
+        if i_tuple_sorted in v_idx:
+            idx_param = v_idx[i_tuple_sorted]
+        else:
+            idx_param = len(v_idx)
+            v_idx[i_tuple_sorted] = idx_param
+
+        gather_idx[i] = idx_param
+
+    #TODO: return a tensor and register as a buffer
+    return nn.Parameter(th.LongTensor(gather_idx), requires_grad=False)
+
+
+def __get_symmetric_tensor_view__(w, idx, out_shape, output_axis):
+    #TODO: this function can be called only after a optim.step() rahter than every time
+    return w.gather(0, idx).view(out_shape).transpose(output_axis, len(out_shape)-1).contiguous()
+
+
 # The Full aggregator is available only when maxOutput Degree is 2
 # h = A*h1*h2 + U1*h1 + U2*h2 + b
 class BinaryFullTensorCell(GenericTreeLSTMCell):
@@ -169,28 +278,6 @@ class BinaryFullTensorCell(GenericTreeLSTMCell):
         h1 = neighbour_h[:, 0, :].view(neighbour_h.size(0), -1)
         h2 = neighbour_h[:, 1, :].view(neighbour_h.size(0), -1)
         return th.einsum('ijk,ni,nj->nk', A, h1, h2) + U1(h1) + U2(h2)
-
-
-# h = U1*h1 + U2*h2 + ... + Un*hn
-class NaryCell(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(NaryCell, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        if not self.pos_stationarity:
-            #NARY aggregation
-            # define parameters for the computation of iou
-            self.U = nn.Linear(max_output_degree * h_size, 3*h_size, bias=False)
-        else:
-            #SUMCHILD aggrefation
-            self.U = nn.Linear(h_size, 3 * h_size, bias=False)
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        if not self.pos_stationarity:
-            return self.U(neighbour_h.view(neighbour_h.size(0), -1))
-        else:
-            return self.U(th.sum(neighbour_h, 1))
 
 
 # h = U3*r3, where r3 = G*r1*r2, r1 = U1*h1 and r2 = U2*h2
@@ -362,83 +449,3 @@ class TTCell(GenericTreeLSTMCell):
 
         h_out = th.matmul(ris.squeeze(), self.U_last)
         return h_out
-
-#similar to ChildSum but instead of performing aggregation by sum of children states
-#aggregation is performed by a GRU treating children as a sequence
-class FwGRUCell(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(FwGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        self.GRU = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias = False)
-        self.U = nn.Linear(h_size, 3 * h_size, bias=False)
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        return  self.U(self.GRU(neighbour_h)[1].squeeze(0))
-
-
-#like the FwGRUCell but using bidirectional GRU
-class BiSharedGRUCell(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(BiSharedGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        self.biGRU = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias=False, bidirectional = True)
-        self.U_fw = nn.Linear(h_size, 3 * h_size, bias=False)
-        self.U_bw = nn.Linear(h_size, 3 * h_size, bias=False)
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        states, last_state = self.biGRU(neighbour_h)
-        h_fw = last_state[0].squeeze(0)
-        h_bw = last_state[1].squeeze(0)
-        return self.U_fw(h_fw) + self.U_bw(h_bw)
-
-
-#like the FwGRUCell but using one forward GRU and one backward GRU
-class BiGRUCell(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(BiGRUCell, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        self.GRU_fw = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias=False)
-        self.GRU_bw = nn.GRU(input_size=h_size, hidden_size=h_size, batch_first=True, bias=False)
-        self.U_fw = nn.Linear(h_size, 3 * h_size, bias=False)
-        self.U_bw = nn.Linear(h_size, 3 * h_size, bias=False)
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        states, h_fw = self.GRU_fw(neighbour_h)
-        states, h_bw = self.GRU_bw(neighbour_h.flip(1))
-        return self.U_fw(h_fw.squeeze(0)) + self.U_bw(h_bw.squeeze(0))
-
-#Simple FeedForward aggregation (semi-positional)
-class SimpleFFAggregationCell(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(SimpleFFAggregationCell, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        self.first_layer = nn.Linear(h_size, h_size, bias=True)
-        self.last_layer = nn.Linear(h_size * max_output_degree, 3 * h_size, bias=True)
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        flatten_h_child = th.tanh(self.first_layer.forward(neighbour_h).view(neighbour_h.size(0),-1))
-        out = th.tanh(self.last_layer.forward(flatten_h_child))
-        return out
-
-#Simple FeedForward aggregation (non-positional)
-class SimpleFFAggregationCell2(GenericTreeLSTMCell):
-
-    def __init__(self, h_size, max_output_degree, pos_stationarity=True):
-        super(SimpleFFAggregationCell2, self).__init__(h_size, max_output_degree, pos_stationarity)
-
-        self.transform = nn.Linear(h_size, h_size, bias=True)
-
-
-    # neighbour_states has shape batch_size x n_neighbours x insize
-    def compute_iou_gate(self, neighbour_h):
-        h_interm = th.tanh(self.transform(neighbour_h)) #apply transformation to each child
-        mean = th.mean(h_interm,1) #get mean of transformations
-        return mean.repeat(1,3) #repetition for the 3 gates

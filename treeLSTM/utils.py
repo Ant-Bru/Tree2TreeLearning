@@ -52,14 +52,6 @@ def load_vocabulary(data_dir, logger, extra = False):
             for line in tqdm(vf.readlines(), desc='Loading vocabulary: '):
                 line = line.strip()
                 vocab[line] = len(vocab)
-        if extra:
-            #adding POStag to vocab
-            text_file = os.path.join(data_dir, 'POStags.txt')
-            with open(text_file, encoding='utf-8') as vf:
-                for line in tqdm(vf.readlines(), desc='Loading vocabulary POStag: '):
-                    line = line.strip()
-                    vocab[line] = len(vocab)
-
         th.save(vocab, object_file)
     logger.info('Vocabulary loaded.')
     return vocab
@@ -79,15 +71,6 @@ def load_embeddings(data_dir, pretrained_emb_file, vocab, logger, extra = False)
                 if sp[0] in vocab:
                     glove_emb[sp[0].lower()] = np.array([float(x) for x in sp[1:]])
 
-        if extra:
-            #adding POStag to embeddings
-            emb_file = os.path.join(data_dir, 'POStag_emb.txt')
-            with open(emb_file , 'r', encoding='utf-8') as pf:
-                for line in tqdm(pf.readlines(), desc='Loading pretrained embeddings POStag:'):
-                    sp = line.split(' ')
-                    if sp[0] in vocab:
-                        glove_emb[sp[0].lower()] = np.array([float(x) for x in sp[1:]])
-
         # initialize with glove
         pretrained_emb = []
         fail_cnt = 0
@@ -102,40 +85,3 @@ def load_embeddings(data_dir, pretrained_emb_file, vocab, logger, extra = False)
 
     logger.info('Pretrained embeddings loaded.')
     return pretrained_emb
-
-
-def print_graphs(list):
-    import matplotlib.pyplot as plt
-    import networkx as nx
-    n = len(list)
-    print("")
-    for k in range(len(list)):
-        g = list[k]
-        plt.subplot(k+1,n,k+1)
-        for i in range(len(g.nodes)):
-            print(i, g.nodes[i].data)#['x'], g.nodes[i].data['y'], g.nodes[i].data['mask'], g.nodes[i].data['h'])
-        print("-")
-        nx.draw(list[k].to_networkx(), with_labels=True)
-    plt.show()
-
-
-def print_graphs2(list):
-  import matplotlib.pyplot as plt
-  import networkx as nx
-  n = len(list)
-  for k in range(len(list)):
-    g = list[k]
-    plt.subplot(k + 1, n, k + 1)
-    G = g.to_networkx(node_attrs=['x'])
-    pos = nx.spring_layout(G, k=len(G.nodes)*10, fixed = [0], scale = 100)
-    #print(g.edges()[0])
-    #print(g.edges()[1])
-    nx.draw(G, pos, node_size = 1000)
-    node_labels = nx.get_node_attributes(G, 'x')
-    for k in node_labels:
-      node_labels[k] = str(node_labels[k].item())+ "(" + str(k) + ")"
-    nx.draw_networkx_labels(G, pos, labels=node_labels)
-    edge_labels = nx.get_edge_attributes(G, 'w')
-    nx.draw_networkx_edge_labels(G, pos, labels=edge_labels)
-
-  plt.show()

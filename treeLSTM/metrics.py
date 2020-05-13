@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 import torch as th
-import numpy as np
 import copy
 
 class BaseMetric(ABC):
