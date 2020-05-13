@@ -1,5 +1,5 @@
 # Tree2TreeLearning
-Machine Learning library for Tree Transductions Learning.
+Deep Learning library for Tree Transductions Learning.
 
 This is a PyTorch/DGL based library for learning of generic deep tree transductions (e.g. tree-to-tree, tree classification/regression, tree-to-sequence).
 
