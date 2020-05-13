@@ -5,4 +5,4 @@ This is a PyTorch/DGL based library for learning of generic deep tree transducti
 
 The library is the deep neural part of the framework developed during the [LISTIT Project](https://dbacciu.github.io/listit/).
 
-This repository provides only the essential modules of the library, for more information and future updated version visit [pyTreeLearn](https://github.com/Ant-Bru/pyTreeLearn)
+This repository provides only the essential modules of the library, for more information and future updated version visit [pyTreeLearn](https://github.com/Ant-Bru/pyTreeLearn).
